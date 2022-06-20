@@ -1,0 +1,388 @@
+#!/bin/sh -e
+#L:
+#L:  MIT License
+#L:  
+#l:  Bug reports, feature requests to gemini|https://harkadev.com/oss
+#l:  Copyright (c) 2022 Harkaitz Agirre, harkaitz.aguirre@gmail.com
+#L:
+#L:  Permission is hereby granted, free of charge, to any person obtaining
+#L:  a copy of this software and associated documentation files (the
+#L:  "Software"), to deal in the Software without restriction, including
+#L:  without limitation the rights to use, copy, modify, merge, publish,
+#L:  distribute, sublicense, and/or sell copies of the Software, and to
+#L:  permit persons to whom the Software is furnished to do so, subject to
+#L:  the following conditions:
+#L:
+#L:  The above copyright notice and this permission notice shall be
+#L:  included in all copies or substantial portions of the Software.
+#L:
+#L:  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+#L:  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+#L:  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+#L:  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+#L:  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+#L:  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+#L:  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#r: ## HGENCRT
+#r:
+#h: Usage: $0 ...
+#h:
+#h: This script helps issuing certificates using `letsencrypt` in remote
+#h: hosts using ssh tunneling.
+#h:
+#h: ... show         : Show configuration.
+#h:
+#h: ... issue DOMAIN...    : Issue certificate for the DOMAIN.
+#h: ... ssh-redirect   SSL : Open redirection in remote machine, shutdown http.
+#h: ... ssh-unredirect SSL : Close redirection, restart http.
+#h: ... del DOMAIN...      : Delete certificates.
+#h:
+#h: ... ls-bare            : List domains.
+#h: ... ls                 : List domains with expiration dates.
+#h:
+#h: ... install SSL|- DOMAIN... : Install certificates.
+#h: ... allow   SSL|- USER...   : Allow users to read SSL certificates.
+#r:
+hgencrt() {
+    local cmd="$1"
+    shift
+    case "${cmd}" in
+        show)               hgencrt_show_variables                  ;;
+        issue)              hgencrt_issue "$@"                      ;;
+        ssh-redirect)       hgencrt_ssh_redirect "$@"               ;;
+        ssh-unredirect)     hgencrt_ssh_unredirect "$@"             ;;
+        del)                hgencrt_del "$@"                        ;;
+        ls-bare)            hgencrt_domain_list "$@"                ;;
+        ls)                 hgencrt_domain_edates "$@"              ;;
+        install)            hgencrt_install "$@"       ;;
+        allow)              hgencrt_allow_user "$@"                 ;;
+        *)                  hgencrt_error "Invalid subcommand ${cmd}"
+                            return 1;;
+    esac
+}
+hgencrt_show_variables() {
+    printf '%-20s : %s\n' HGENCRT_DIRECTORY  "${HGENCRT_DIRECTORY}"
+    printf '%-20s : %s\n' HGENCRT_EMAIL      "${HGENCRT_EMAIL}"
+    printf '%-20s : %s\n' LETSENCRYPT_CFGDIR "${LETSENCRYPT_CFGDIR}"
+    printf '%-20s : %s\n' CERTBOT            "${CERTBOT}"
+}
+hgencrt_calc_variables() {
+    HGENCRT_DIRECTORY="${HGENCRT_DIRECTORY:-${HOME}/.hgencrt}"
+    HGENCRT_EMAIL="${HGENCRT_EMAIL:-}"
+    if test ! -n "${LETSENCRYPT_CFGDIR}";then
+        case "`uname -o`" in
+            GNU/Linux) LETSENCRYPT_CFGDIR=/etc/letsencrypt;;
+            FreeBSD)   LETSENCRYPT_CFGDIR=/usr/local/etc/letsencrypt;;
+            *)         hgencrt_error "Unsupported platform.";;
+        esac
+    fi
+    CERTBOT="${CERTBOT:-`which certbot 2>/dev/null || true`}"
+}
+
+## -----------------------------------------------------------------------------
+## ---- LET'S ENCRYPT AND SSH REDIRECTION --------------------------------------
+## -----------------------------------------------------------------------------
+hgencrt_issue() { # DOMAINS...
+    local domain=
+    ## Require email to be configured and certbot installed.
+    if test ! -n "${HGENCRT_EMAIL}";then
+        hgencrt_error "Please configure an email address on HGENCRT_EMAIL."
+        return 1
+    elif test ! -n "${CERTBOT}";then
+        hgencrt_error "Please install certbot."
+        return 1
+    fi
+    ## For each specified domain.
+    sudo tee "${LETSENCRYPT_CFGDIR}/letsencrypt.ini" <<- EOF >/dev/null
+	rsa-key-size = 4096
+	server = https://acme-v02.api.letsencrypt.org/directory
+	email = ${HGENCRT_EMAIL}
+	text = True
+	agree-tos = True
+	renew-by-default = True
+	authenticator = standalone
+	EOF
+    ## Run issuing command.
+    mkdir -p "${HGENCRT_DIRECTORY}"
+    for domain in "$@";do
+        sudo                               \
+            domain="${domain}"             \
+            cfgdir="${LETSENCRYPT_CFGDIR}" \
+            savdir="${HGENCRT_DIRECTORY}"  \
+            user="`whoami`"                \
+            certbot="${CERTBOT}"           \
+            sh -c '
+            f_key="${cfgdir}/live/${domain}/privkey.pem"
+            f_crt="${cfgdir}/live/${domain}/cert.pem"
+            f_cas="${cfgdir}/live/${domain}/fullchain.pem"
+            t_key="${savdir}/${domain}.key"
+            t_crt="${savdir}/${domain}.cert"
+            t_cas="${savdir}/${domain}.ca"
+            set -e
+            ${certbot} --non-interactive certonly -c "${cfgdir}/letsencrypt.ini" -d "${domain}" -d www."${domain}" 2>&1 | cat >&2
+            cp -v "${f_key}" "${t_key}"; chown -v "$user" "${t_key}"
+            cp -v "${f_crt}" "${t_crt}"; chown -v "$user" "${t_crt}"
+            cp -v "${f_cas}" "${t_cas}"; chown -v "$user" "${t_cas}"'
+    done
+}
+hgencrt_ssh_redirect() {
+    if test ! -n "${1}";then
+        hgencrt_error "Please specify a server."
+        return 1
+    fi
+    ssh -tt -q                                                    \
+        -R 8888:localhost:80 `: '(l:remote:8080)-->(c:local:80)'` \
+        "${1}" '
+        if test -f /usr/local/etc/rc.d/apache24;then # FREEBSD
+            sudo killall socat         || true
+            sudo service apache24 stop || true
+            sleep 3
+        fi
+        sudo socat -v TCP-LISTEN:80,fork TCP:localhost:8888' >&2 &
+    sleep 5
+}
+hgencrt_ssh_unredirect() {
+    if test ! -n "${1}";then
+        hgencrt_error "Please specify a server."
+        return 1
+    fi
+    ssh -tt -q "${1}" '
+        sudo killall socat          || true
+        if test -f /usr/local/etc/rc.d/apache24;then # FREEBSD
+            sleep 2
+            sudo service apache24 start || true
+        fi' >&2
+}
+hgencrt_del() {
+    for domain in "$@";do
+        rm -fv \
+           "${HGENCRT_DIRECTORY}/${domain}.key" \
+           "${HGENCRT_DIRECTORY}/${domain}.cert" \
+           "${HGENCRT_DIRECTORY}/${domain}.ca"
+    done
+}
+
+## ----------------------------------------------------------------------
+## ---- CSR AND KEY GENERATION ------------------------------------------
+## ----------------------------------------------------------------------
+hgencrt_generate_csr() { # DOMAIN...
+    local domain=
+    for domain in "$@";do
+        local keyfile="${HGENCRT_DIRECTORY}/${domain}.key"
+        local csrfile="${HGENCRT_DIRECTORY}/${domain}.csr"
+        local keydir="`dirname "${keyfile}"`"
+        if test ! -f "${keyfile}";then
+            echo "${domain}: Generating private key ..."
+            mkdir -p "${keydir}"
+            openssl genrsa -out "${keyfile}" 2048
+        fi
+        if test ! -f "${csrfile}";then
+            echo "${domain}: Generating CSR ..."
+            mkdir -p "${keydir}"
+            openssl req -new -key "${keyfile}" -out "${csrfile}"
+        fi
+    done
+}
+hgencrt_print_csr() { # DOMAIN...
+    local domain=
+    for domain in "$@";do
+        local csrfile="${HGENCRT_DIRECTORY}/${domain}.csr"
+        if test -f "${csrfile}";then
+            cat "${csrfile}"
+        else
+            hgencrt_error "File ${csrfile} does not exist."
+            return 1
+        fi
+    done
+}
+hgencrt_extract_zip() { # ZIPS...
+    local zip=
+    for zip in "$@";do
+        ## Check the file exists.
+        if test ! -f "${zip}";then
+            hgencrt_error "File ${zip} does not exist."
+            return 1
+        fi
+        ## Create a temporary directory and extract the zip.
+        local tmpdir="/tmp/hgencrt.${USER}" 
+        rm -rf "${tmpdir}"
+        mkdir -p "${tmpdir}"
+        unzip "${zip}" -d "${tmpdir}"
+        ## Search certificates.
+        local crtfile_f="`find "${tmpdir}" -iregex '.*\.crt$'       | head -n 1`"
+        local casfile_f="`find "${tmpdir}" -iregex '.*\.ca-bundle$' | head -n 1`"
+        if test ! -n "${crtfile_f}";then
+            hgencrt_error "${zip}: No certificate in the zip."
+            return 1
+        fi
+        if test ! -n "${casfile_f}";then
+            hgencrt_error "${zip}: No ca chain in the zip."
+            return 1
+        fi
+        ## Get domain.
+        local domain="`basename "${crtfile_f}" .crt | tr '_' '.'`"
+        ## Calculate destination files.
+        local crtfile_t="${HGENCRT_DIRECTORY}/${domain}.cert"
+        local casfile_t="${HGENCRT_DIRECTORY}/${domain}.ca"
+        if test -f "${crtfile_t}";then
+            hgencrt_error "${zip}: File ${crtfile_t} exists."
+            return 1
+        fi
+        if test -f "${casfile_t}";then
+            hgencrt_error "${zip}: File ${casfile_t} exists." 
+            return 1
+        fi
+        ## Copy files.
+        mkdir -p "${HGENCRT_DIRECTORY}"
+        cp -v "${crtfile_f}" "${crtfile_t}"
+        cp -v "${casfile_f}" "${casfile_t}"
+    done
+}
+
+## ----------------------------------------------------------------------
+## ---- INSTALL CERTIFICATES IN REMOTE MACHINES -------------------------
+## ----------------------------------------------------------------------
+hgencrt_install() { # SSL|- DOMAINS...
+    if test ! -n "$1"; then
+        hgencrt_error "Please specify a SSL machine name."
+        return 1
+    fi
+    local machine="$1" tmpdir="/tmp/.hgencrt" pwd="`pwd`"
+    shift
+    rm -rf "${tmpdir}"
+    mkdir -p "${tmpdir}"
+    local cmd="
+    echo \"Extracting to \`uname -n\`:/etc/ssl ...\"
+    sudo tar vx -f - -o -C /etc/ssl
+    sudo pw groupadd ssl 2>/dev/null || true
+    sudo groupadd    ssl 2>/dev/null || true"
+    for domain in "$@"; do
+        ## Get files.
+        local keyfile="${HGENCRT_DIRECTORY}/${domain}.key"
+        local crtfile="${HGENCRT_DIRECTORY}/${domain}.cert"
+        local casfile="${HGENCRT_DIRECTORY}/${domain}.ca"
+        local selfile="${HGENCRT_DIRECTORY}/${domain}.dkim-sel"
+        if test ! -f "${keyfile}"; then
+            hgencrt_error "File ${keyfile} does not exist."
+            return 1
+        elif test ! -f "${crtfile}"; then
+            hgencrt_error "File ${crtfile} does not exist."
+            return 1
+        elif test ! -f "${casfile}"; then
+            hgencrt_error "File ${casfile} does not exist."
+            return 1
+        fi
+        ## Copy files to a temporary directory.
+        cp "${keyfile}" "${crtfile}" "${casfile}" "${tmpdir}"
+        cat "${casfile}" "${keyfile}" >> "${tmpdir}/${domain}.cert"
+        ## Add change group.
+        local cmd="${cmd}
+        sudo chmod       0640 /etc/ssl/${domain}.key
+        sudo chgrp       ssl  /etc/ssl/${domain}.key"
+        ## Copy dkim if available.
+        if test -f "${selfile}"; then
+            local selector="`cat "${selfile}"`"
+            local dkimfile="${HGENCRT_DIRECTORY}/${selector}.dkim-key"
+            local dkimpub="${HGENCRT_DIRECTORY}/${selector}.dkim-pub"
+            if test -f "${dkimfile}" && test -f "${dkimpub}"; then
+                cp "${dkimfile}" "${dkimpub}" "${selfile}" "${tmpdir}"
+            fi
+            local cmd="${cmd}
+            sudo chmod 0640 /etc/ssl/${selector}.dkim-key
+            sudo chgrp ssl  /etc/ssl/${selector}.dkim-key"
+        fi
+    done
+    ## Send using tar.
+    cd "${tmpdir}"
+    if test @"${machine}" = @"-";then
+        tar c . | sh -c "${cmd}"
+    else
+        tar c . | ssh "${machine}" "${cmd}"
+    fi
+    cd "${pwd}"
+}
+hgencrt_allow_user() { # SSL|- USERS...
+    if test ! -n "${1}";then
+        hgencrt_error "Please specify a machine name."
+        return 1
+    fi
+    local machine="$1" cmd= username=
+    shift
+    for username in "$@";do
+        local cmd="${cmd}
+        if which pw >/dev/null 2>&1;then
+            sudo pw groupadd ssl 2>/dev/null || true
+            sudo pw group mod ssl -m '${username}'
+        elif which usermod >/dev/null 2>&1;then
+            sudo sudo groupadd ssl 2>/dev/null || true
+            sudo usermod -a -G ssl '${username}'
+        else
+            echo 'hgencrt: error: Do not know how to add a user to a group.'
+            exit 1
+        fi"
+    done
+    if test @"${machine}" = @"-";then
+        sh -c "${cmd}"
+    else
+        ssh -t "${machine}" "${cmd}"
+    fi
+}
+
+## ----------------------------------------------------------------------
+## ---- DOMAIN MANAGEMENT -----------------------------------------------
+## ----------------------------------------------------------------------
+hgencrt_domain_list() {
+    if test -d "${HGENCRT_DIRECTORY}";then
+        find "${HGENCRT_DIRECTORY}" \
+             -maxdepth 1            \
+             -mindepth 1            \
+             -type f                \
+             -iregex '.*\.cert'     \
+             -exec basename '{}' '.cert' ';'
+    fi
+}
+hgencrt_domain_edates() {
+    local domain=
+    for domain in `hgencrt_domain_list`;do
+        local date="`hgencrt_domain_edate "${domain}"`"
+        printf '%-30s : %s\n' "${domain}" "${date}"
+    done
+}
+hgencrt_domain_edate() {
+    local domain="${1}" certfile="${HGENCRT_DIRECTORY}/${1}.cert"
+    if test ! -n "${domain}";then
+        hgencrt_error "Please specify a domain name."
+        return 1
+    elif test ! -f "${certfile}";then
+        hgencrt_error "No certificate for ${domain}."
+        return 1
+    fi
+    local date="`openssl x509 -noout -enddate < "${certfile}" | sed 's|^notAfter=||'`"
+    if test -n "${date}";then
+        date -d "${date}" "+%Y-%m-%d"
+    fi
+}
+
+
+
+## ----------------------------------------------------------------------
+## ---- TEST CERTIFICATES -----------------------------------------------
+## ----------------------------------------------------------------------
+a() {
+    firefox https://www.ssllabs.com/ssltest/analyze.html?d=${HSSL_MACHINE_NAME}
+}
+
+
+## ----------------------------------------------------------------------
+hgencrt_error() { echo "${SCRNAME}: error: $*" >&2; }
+SCRNAME="`basename "$0"`"
+hgencrt_calc_variables
+if test @"${SCRNAME}" = @"hgencrt";then
+    if test -n "$1";then
+        hgencrt "$@"
+    else
+        sed -n 's/^ *#h: \{0,1\}//p' "$0" | sed "s|\\\$0|`basename $0`|g"
+        echo ""
+        sed -n 's/^ *#l: \{0,2\}//p' "$0"
+    fi
+fi

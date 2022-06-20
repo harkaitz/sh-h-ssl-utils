@@ -1,0 +1,123 @@
+#!/bin/sh -e
+#L:
+#L:  MIT License
+#L:  
+#l:  Bug reports, feature requests to gemini|https://harkadev.com/oss
+#l:  Copyright (c) 2022 Harkaitz Agirre, harkaitz.aguirre@gmail.com
+#L:
+#L:  Permission is hereby granted, free of charge, to any person obtaining
+#L:  a copy of this software and associated documentation files (the
+#L:  "Software"), to deal in the Software without restriction, including
+#L:  without limitation the rights to use, copy, modify, merge, publish,
+#L:  distribute, sublicense, and/or sell copies of the Software, and to
+#L:  permit persons to whom the Software is furnished to do so, subject to
+#L:  the following conditions:
+#L:
+#L:  The above copyright notice and this permission notice shall be
+#L:  included in all copies or substantial portions of the Software.
+#L:
+#L:  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+#L:  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+#L:  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+#L:  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+#L:  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+#L:  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+#L:  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#r: ## HDKIM
+#r:
+#h: Usage: $0 ...
+#h:
+#h: This script helps configuring DKIM.
+#h: - https://prefetch.eu/blog/2020/email-server/
+#h: - https://www.mail-tester.com/
+#h:
+#h: show                   : Show configuration.
+#h:
+#h: create [SELECTOR]      : Create public and private keys for DKIM.
+#h: list                   : List DKIM keys.
+#h:
+#h: assign     DOMAIN SELECTOR : Assign a selector to a domain.
+#h: selector   DOMAIN          : Print the selector for the domain.
+#h: dns-record DOMAIN          : Print the DKIM DNS record for DOMAIN.
+#r:
+. vrun
+. hlog
+hdkim() {
+    local cmd="$1"
+    shift
+    case "${cmd}" in
+        show)       hdkim_show_variables                     ;;
+        create)     hdkim_create "$@"                        ;;
+        list)       hdkim_list                               ;;
+        assign)     hdkim_assign "$@"                        ;;
+        selector)   hdkim_selector "$@"                      ;;
+        dns-record) hdkim_dns_record "$@"                    ;;
+        *)          hlog fatal "Invalid subcommand ${cmd}." ;;
+    esac
+}
+hdkim_show_variables() {
+    printf '%-20s : %s\n' HGENCRT_DIRECTORY "${HGENCRT_DIRECTORY}"
+}
+hdkim_calc_variables() {
+    HGENCRT_DIRECTORY="${HGENCRT_DIRECTORY:-${HOME}/.hgencrt}"
+}
+## -------------------------------------------------------------------------
+hdkim_create() { # SELECTOR
+    local selector="${1:-`date '+%Y%m%d'`}"
+    if test ! -f "${HGENCRT_DIRECTORY}/${selector}.dkim-key";then
+        mkdir -p "${HGENCRT_DIRECTORY}"
+        vrun openssl genrsa -out "${HGENCRT_DIRECTORY}/${selector}.dkim-key" 2048
+    fi
+    if test ! -f "${HGENCRT_DIRECTORY}/${selector}.dkim-pub";then
+        vrun openssl rsa -pubout                         \
+              -in  "${HGENCRT_DIRECTORY}/${selector}.dkim-key" \
+              -out "${HGENCRT_DIRECTORY}/${selector}.dkim-pub"
+    fi
+}
+hdkim_list() {
+    if test -d "${HGENCRT_DIRECTORY}";then
+        find "${HGENCRT_DIRECTORY}" \
+             -type f                \
+             -iregex '.*\.dkim-pub' \
+             -exec basename '{}' '.dkim-pub' ';'
+    fi
+}
+hdkim_assign() {
+    local domain="$1" selector="$2"
+    hlog errif "Please specify a domain name." test ! -n "${domain}"
+    hlog errif "Please specify a selector."    test ! -n "${selector}"
+    local seckey="${HGENCRT_DIRECTORY}/${selector}.dkim-key"
+    hlog errif "File ${seckey} does not exist." test ! -f "${seckey}"
+    hlog info "Creating ${HGENCRT_DIRECTORY}/${domain}.dkim-sel ..."
+    echo "${selector}" > "${HGENCRT_DIRECTORY}/${domain}.dkim-sel"
+}
+hdkim_selector() {
+    local domain="$1"
+    local selfile="${HGENCRT_DIRECTORY}/${domain}.dkim-sel"
+    hlog errif "File ${selfile} does not exist." test ! -f "${selfile}"
+    cat "${selfile}"
+}
+hdkim_dns_record() {
+    local domain="$1"
+    local selector="`hdkim_selector "$@"`"
+    test -n "${selector}"
+    local pubfile="${HGENCRT_DIRECTORY}/${selector}.dkim-pub"
+    hlog errif "File ${pubfile} does not exist." test ! -f "${pubfile}"
+    printf '%-30s IN TXT ("k=rsa;t=s;p="\n' "${selector}._domainkey.${domain}."
+    sed '1d;$d' "${pubfile}" | sed 's|^|"|;s|$|"|'
+    echo ")"
+}
+
+
+
+
+## -------------------------------------------------------------------------
+if test @"`basename "$0"`" = @"hdkim";then
+    if test -n "$1";then
+        hdkim "$@"
+    else
+        sed -n 's/^ *#h: \{0,1\}//p' "$0" | sed "s|\\\$0|`basename $0`|g"
+        echo ""
+        sed -n 's/^ *#l: \{0,2\}//p' "$0"
+    fi
+fi
