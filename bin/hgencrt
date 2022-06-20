@@ -23,8 +23,7 @@
 #L:  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 #L:  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 #L:  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-#r: ## HGENCRT
-#r:
+##:
 #h: Usage: $0 ...
 #h:
 #h: This script helps issuing certificates using `letsencrypt` in remote
@@ -42,7 +41,7 @@
 #h:
 #h: ... install SSL|- DOMAIN... : Install certificates.
 #h: ... allow   SSL|- USER...   : Allow users to read SSL certificates.
-#r:
+##:
 hgencrt() {
     local cmd="$1"
     shift

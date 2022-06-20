@@ -23,8 +23,7 @@
 #L:  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 #L:  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 #L:  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-#r: ## HDKIM
-#r:
+##:
 #h: Usage: $0 ...
 #h:
 #h: This script helps configuring DKIM.
@@ -39,7 +38,7 @@
 #h: assign     DOMAIN SELECTOR : Assign a selector to a domain.
 #h: selector   DOMAIN          : Print the selector for the domain.
 #h: dns-record DOMAIN          : Print the DKIM DNS record for DOMAIN.
-#r:
+##:
 . vrun
 . hlog
 hdkim() {
